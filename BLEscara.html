@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="jp">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Controller</title>
+    <script src="https://cdn.jsdelivr.net/npm/p5@1.11.7/lib/p5.min.js"></script>
+</head>
+
+<body style="text-align: center;">
+    <button id="connect" onclick="connectBLE()">connect</button>
+    <script>
+        let bluetoothDevice;
+        let chRead, chWrite;
+        let received = null;
+
+        async function connectBLE() {
+            bluetoothDevice = await navigator.bluetooth.requestDevice({
+                filters: [{ name: 'RobotArm' }],
+                optionalServices: ['12345678-1234-5678-1234-56789abcdef0']
+            });
+            const server = await bluetoothDevice.gatt.connect();
+            const service = await server.getPrimaryService('12345678-1234-5678-1234-56789abcdef0');
+
+            chRead = await service.getCharacteristic('12345678-8765-4321-abcd-abcdefabcdef');
+            chWrite = await service.getCharacteristic('12345678-8765-4321-abcd-abcdefabcde0');
+        }
+
+        async function disconnectBLE() {
+            if (!bluetoothDevice || !bluetoothDevice.gatt.connected) return;
+            bluetoothDevice.gatt.disconnect();
+        }
+
+        // 継続的に読み取り続ける。結果はグローバル変数に格納
+        async function readBLE() {
+            // 接続待ち 早期returnでも setTimeout は忘れない
+            if (!bluetoothDevice || !bluetoothDevice.gatt.connected) {
+                console.log("device not connected");
+                setTimeout(readBLE, 100);
+                return;
+            }
+            // 接続中 早期returnでも setTimeout は忘れない
+            if (!chRead) {
+                console.log("characteristic not ready");
+                setTimeout(readBLE, 100);
+                return;
+            }
+
+            try {
+                // 受信
+                const buffer = await chRead.readValue();
+                const dataView = new DataView(buffer.buffer);
+                received = [
+                    dataView.getFloat32(0, true),
+                    dataView.getFloat32(4, true)
+                ];
+
+            } catch (error) {
+                console.error('Error receiveing data:', error);
+            }
+
+            // 再帰ループ
+            setTimeout(readBLE, 0);
+        }
+        window.onload = async function load() {
+            // 取得ループを走らせる
+            await readBLE();
+        }
+
+        // パラメーターの送信　変更があった時のみ
+        async function writeBLE(data) {
+            // 接続待ち
+            if (!bluetoothDevice || !bluetoothDevice.gatt.connected) {
+                console.log("device not connected");
+                return;
+            }
+            // 接続中
+            if (!chWrite) {
+                console.log("characteristic not ready");
+                return;
+            }
+
+            // 送信データをまとめる
+            let buffer = new ArrayBuffer(8);
+            let dataView = new DataView(buffer);
+            dataView.setFloat32(0, data[0], true);
+            dataView.setFloat32(4, data[1], true);
+
+            // 送信
+            try {
+                await chWrite.writeValue(buffer);
+            } catch (error) {
+                console.error('Error sending data:', error);
+            }
+        }
+
+        function circleIntersection(x0, y0, r0, x1, y1, r1) {
+            const dx = x1 - x0;
+            const dy = y1 - y0;
+            const d = Math.sqrt(dx * dx + dy * dy);
+
+            // 解なし
+            if (d > r0 + r1 || d < Math.abs(r0 - r1)) return null;
+
+            const a = (r0 * r0 - r1 * r1 + d * d) / (2 * d);
+            const h = Math.sqrt(r0 * r0 - a * a);
+
+            const xm = x0 + a * dx / d;
+            const ym = y0 + a * dy / d;
+
+            const rx = -dy * (h / d);
+            const ry = dx * (h / d);
+
+            return [xm + rx, ym + ry, xm - rx, ym - ry];
+        }
+
+        function cross2D(x1, y1, x2, y2) {
+            return x1 * y2 - y1 * x2;
+        }
+
+        const scale = 2; // px/mm
+        const AB = AD = 100;
+        const BC = CD = 105;
+        let angle1 = 0;
+        let angle2 = 90;
+
+        function setup() {
+            createCanvas(800, 800);
+        }
+
+        function draw() {
+            background(255);
+
+            noFill();
+            stroke(0);
+
+            // 受信したデータがあったらそれで更新
+            if (received !== null) {
+                angle1 = received[0];
+                angle2 = received[1];
+                console.log("received", angle1, angle2);
+                received = null;
+            }
+
+            // AB, ADのベクトル（角度はラジアンで使用）
+            const angle1Rad = radians(angle1);
+            const angle2Rad = radians(angle2);
+
+            // 点A（原点）
+            const Ax = width / 2;
+            const Ay = height / 2;
+
+            // 点B = A + ABのベクトル
+            const Bx = Ax + AB * scale * cos(angle1Rad);
+            const By = Ay + AB * scale * sin(angle1Rad);
+
+            // 点D = A + ADのベクトル
+            const Dx = Ax + AD * scale * cos(angle2Rad);
+            const Dy = Ay + AD * scale * sin(angle2Rad);
+
+            // Cを求める
+            let Cx = Bx + (Dx - Ax);
+            let Cy = By + (Dy - Ay);
+            const intersection = circleIntersection(Bx, By, BC * scale, Dx, Dy, CD * scale);
+            if (intersection) {
+                // 選択基準: 角ABCの外積 > 0 を選ぶ（右手系）
+                const [Cx1, Cy1, Cx2, Cy2] = intersection;
+                [Cx, Cy] = cross2D(Bx - Ax, By - Ay, Cx1 - Bx, Cy1 - By) > 0 ? [Cx1, Cy1] : [Cx2, Cy2];
+            }
+
+            // 描画
+            stroke(0);
+            strokeWeight(4);
+
+            // 本体
+            circle(width / 2, height / 2, 28 * scale);
+            circle(width / 2, height / 2, 68 * scale);
+
+            fill(0);
+            circle(Ax, Ay, 8); // 点A
+            circle(Bx, By, 8); // 点B
+            circle(Cx, Cy, 8); // 点C
+            circle(Dx, Dy, 8); // 点D
+
+            // 線分（腕）
+            stroke(50);
+            line(Ax, Ay, Bx, By); // AB
+            line(Ax, Ay, Dx, Dy); // AD
+            line(Bx, By, Cx, Cy); // BC
+            line(Dx, Dy, Cx, Cy); // DC
+
+            if (mouseIsPressed) {
+                circle(mouseX, mouseY, 10);
+                if (frameCount % 10 === 0) {
+
+                    // 極座標を送信
+                    let dx = (mouseX - width / 2) / scale;
+                    let dy = (mouseY - height / 2) / scale;
+                    theta = 180 * atan2(dy, dx) / PI;
+                    r = sqrt(dx * dx + dy * dy);
+
+                    writeBLE([theta, r]);
+                    console.log("send", theta, r);
+                }
+            }
+        }
+    </script>
+</body>
+
+</html>
